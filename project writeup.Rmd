@@ -1,0 +1,173 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Lee Murray"
+output: html_document
+---
+
+This analysis is based on data taken from the following study:
+
+*Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H.*
+*Qualitative Activity Recognition of Weight Lifting Exercises.* 
+*Proceedings of 4th International Conference in Cooperation with SIGCHI* 
+*(Augmented Human '13). Stuttgart, Germany: ACM SIGCHI, 2013.*
+
+More information about the data and methods are available 
+[from the authors](http://groupware.les.inf.puc-rio.br/har). The 
+[training data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+and the [testing data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) 
+are both available for download. 
+
+## Background
+
+There is great interest in collecting and analyzing data from human activities.
+In this work will be analyzing data collected from six subjects performing 
+Unilateral Dumbbell Biceps Curl in five different ways. The goal is to use
+machine learning to predict which way it was done. Class A is performing the
+excercise properly and the other four classes are each a common error of the
+excercise. Accelerometer, gyrometer, and magnetometer data was collected from 
+various points on the subjects bodies.
+
+## Input Data
+
+To begin the analysis we will load the required packages and input the data
+```{r Import data}
+# load packages
+library(caret);library(ggplot2);library(randomForest)
+#download files if they do not already exist in working directory
+
+if (!file.exists('pml-training.csv')){
+     fileurl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+     download.file(fileurl,'pml-training.csv')
+}
+if (!file.exists('pml-testing.csv')){
+     fileurl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+     download.file(fileurl,'pml-testing.csv')
+}
+
+# read in files with empty strings and #DIV/0! as NA values
+data <- read.csv('pml-training.csv',na.strings=c('NA','','#DIV/0!'))
+testing <- read.csv('pml-testing.csv',na.string=c('NA','','#DIV/0!'))
+```
+Exploratory analysis and reading of the documentation revealed that much of the
+data consists of NA values. This is because the original authors performed time 
+series analysis and computed certain values in windows, those values only appear
+once in each window. Since we will not be performing time series analysis all of
+these variables will be removed from the data. This is easily done by filtering 
+based on the number of NA values in column.
+```{r Filter Data}
+#calculate and display number of NA values per column
+howmanyna <- sapply(data,function(x) sum(is.na(x)))
+table(howmanyna)
+#remove columns which contain almost all NA values
+colremove <- names(howmanyna[howmanyna>=19216])
+training <- data[,!(names(data) %in% colremove)] 
+```
+In addition to these columns the first seven columns of the data frame contain
+row numbers, timestamps, and subject ID's which will not be neccesary for our
+analysis, they are also removed
+```{r, Filter Data 2}
+# display and remove the identifying and timestamp columns
+names(training[1:7])
+training <- training[,-c(1:7)]
+```
+
+## Feature Selection
+
+In the documentation of the data the authors reveal that in addition to 
+calculating time series averages there are also calculations of the euler
+angles done for every data point. These are in the data set labeled 'pitch', 
+'yaw', and 'roll'. I was interested in whether prediction accuracy would vary
+based on whether these computed data worked better than the raw data. As such
+I filter out the dataset based on this criteria.
+```{r Feature 1}
+# grab indices of names which contain _x,_y, or _z, these are the raw data
+# indices. grab the remaining indics (and the last index, classe) as the
+# calculated indices
+rawdataindices <- grep(x=names(training),pattern='_x|_y|_z')
+avedataindices <- setdiff(1:53,rawdataindices)
+```
+We will now divide the data into training, cross validation, and test sets. We
+will use 50% of the data for training and split the other half evenly into
+cross validation and testing sets. Seed values are set to ensure reproducibility
+of results. We also create the trainraw and trainave dataset, based on whether
+the columns were the raw data or the calculated data.
+```{r Subset}
+# split into training, cross validation, and testing sets
+set.seed(121)
+traininds <- createDataPartition(y=training$classe,p=0.5,list=FALSE)
+train <- training[traininds,]
+rest <- training[-traininds,]
+set.seed(565)
+cvinds <- createDataPartition(y=rest$classe[],p=0.5,list=FALSE)
+test <- rest[-cvinds,]
+cv <- rest[cvinds,]
+
+# split based on the data type
+trainraw <- train[,c(rawdataindices,53)]
+trainave <- train[,avedataindices]
+```
+
+## Model Creation and Testing
+
+Now we are ready to make models, I chose to use random forests for modeling, and
+based on information in the course forums decided to set my own parameter values
+to limit the fitting time to a reasonable length. I created three models, the
+first using just the raw gyrometer/accelerometer/magnetometer data, a second
+with the calculated data, and a third using both.
+
+```{r fit model,cache=TRUE}
+# set control parameters, including seeds, for model creation
+ctrlpar <- trainControl(method='cv',number=3,repeats=1,seeds=list(c(121L,565L,787L),
+                                                                  c(323L,454L,898L),
+                                                                  c(212L,656L,878L),
+                                                                  369L))
+# fit model to raw data
+modelraw <- train(classe~.,data=trainraw,method='rf',trControl=ctrlpar)
+# fit model to calculated data
+modelave <- train(classe~.,data=trainave,method='rf',trControl=ctrlpar)
+# fit model to raw and calculated data
+modelboth <- train(classe~.,data=train,method='rf',trControl=ctrlpar)
+```
+
+By limiting the number of cross validation attempts we potentially have higher
+bias, however the data set is fairly large and this should not be a problem. We
+can now create confusion matrices for each model to measure their performance on
+the cross validation data
+```{r cross validation}
+# generate predictions
+predictraw <- predict(modelraw,cv)
+predictave <- predict(modelave,cv)
+predictboth <- predict(modelboth,cv)
+# display confusion matrices
+confusionMatrix(predictraw,cv$classe)
+confusionMatrix(predictave,cv$classe)
+confusionMatrix(predictboth,cv$classe)
+```
+
+All of these models performed very well, with high accuracy and kappa values. 
+None of the off diagonal terms are particularly large, so accuracy is a good 
+measure for determing which model to use. I decided to use the one with both
+the raw and computed values. Next I used the test set to estimate the out of 
+sample error for this model.
+```{r out of sample error}
+# generate confusion matrix for test set data
+predictfinal <- predict(modelboth,test)
+confusionMatrix(predictfinal,test$classe)
+```
+
+The estimated out of sample error is 1-Accuracy or `r 1-0.986`. Finally, I 
+created estimates of the testing set provided by the orignal authors using
+the submission code provided by the class. The model got a 100% score on these
+values.
+
+```{r}
+predictsubmit <- predict(modelboth,testing)
+pml_write_files = function(x){
+     n = length(x)
+     for(i in 1:n){
+          filename = paste0("problem_id_",i,".txt")
+          write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+     }
+}
+pml_write_files(predictsubmit)
+```
